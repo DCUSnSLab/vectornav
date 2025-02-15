@@ -3,9 +3,6 @@
 	<arg name="target_frame" default="base_link"/>
 	<arg name="frame_id" default="vectornav"/>
 
-	<include file="$(find vectornav)/launch/vectornav.launch">
-		<arg name="frame_id" value="$(arg frame_id)"/>
-	</include>
 
 	<!-- Transforms VN-100 tilted data in imu_link frame to ENU data in base_link frame -->
 	<node pkg="nodelet" type="nodelet" name="imu_manager" args="manager"/>
