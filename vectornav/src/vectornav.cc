@@ -10,6 +10,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <string>
 
@@ -147,6 +148,9 @@ Vectornav::Vectornav(const rclcpp::NodeOptions & options) : Node("vectornav", op
   // Message Header
   declare_parameter<std::string>("frame_id", "vectornav");
 
+  // Diagnostic services toggle (operator-triggered reset/tare/acc-bias)
+  declare_parameter<bool>("enable_diagnostic_services", true);
+
   // Composite Data Publisher
   pub_common_ =
     this->create_publisher<vectornav_msgs::msg::CommonGroup>("vectornav/raw/common", 10);
@@ -173,6 +177,10 @@ Vectornav::Vectornav(const rclcpp::NodeOptions & options) : Node("vectornav", op
 
   // Connect to the sensor
   connect(port, baud);
+
+  // Advertise diagnostic services after the sensor handle exists; handlers are guarded by try/catch
+  // so they remain safe even when the device is currently disconnected.
+  advertise_diagnostic_services();
 
   // Monitor Connection
   if (reconnect_ms > 0ms) {
@@ -1428,5 +1436,101 @@ vectornav_msgs::msg::InsStatus Vectornav::toMsg(const vn::protocol::uart::InsSta
   lhs.gps_compass = rhs & 0x0200;
   return lhs;
 }
+//
+// Diagnostic services
+//
+// Ported from RobotnikAutomation/vectornav, commit
+// "feat: add services to reset and tare device (#21)". These are manual,
+// operator-triggered actions; they are independent of the automatic
+// reconnect timer.
+//
+
+void Vectornav::advertise_diagnostic_services()
+{
+  if (!get_parameter("enable_diagnostic_services").as_bool()) {
+    RCLCPP_INFO(get_logger(), "Diagnostic services disabled by parameter");
+    return;
+  }
+
+  srv_reset_device_ = create_service<std_srvs::srv::Trigger>(
+    "~/reset_device",
+    std::bind(&Vectornav::reset_device, this, _1, _2));
+
+  srv_tare_device_ = create_service<std_srvs::srv::Trigger>(
+    "~/tare_device",
+    std::bind(&Vectornav::tare_device, this, _1, _2));
+
+  srv_reset_acc_bias_ = create_service<std_srvs::srv::Trigger>(
+    "~/reset_acc_bias",
+    std::bind(&Vectornav::reset_acc_bias, this, _1, _2));
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Diagnostic services advertised: ~/reset_device, ~/tare_device, ~/reset_acc_bias");
+}
+
+void Vectornav::reset_device(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
+{
+  RCLCPP_INFO(get_logger(), "reset_device service called");
+  try {
+    if (!vs_) {
+      throw std::runtime_error("sensor handle is null");
+    }
+    vs_->reset();
+    resp->success = true;
+    resp->message = "Device reset command sent. Wait for device to reboot.";
+  } catch (const std::exception & e) {
+    resp->success = false;
+    resp->message = e.what();
+    RCLCPP_ERROR(get_logger(), "reset_device failed: %s", e.what());
+  }
+}
+
+void Vectornav::tare_device(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
+{
+  RCLCPP_INFO(get_logger(), "tare_device service called");
+  try {
+    if (!vs_) {
+      throw std::runtime_error("sensor handle is null");
+    }
+    vs_->tare();
+    resp->success = true;
+    resp->message = "Device tare command sent. Current readings zeroed.";
+  } catch (const std::exception & e) {
+    resp->success = false;
+    resp->message = e.what();
+    RCLCPP_ERROR(get_logger(), "tare_device failed: %s", e.what());
+  }
+}
+
+void Vectornav::reset_acc_bias(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
+{
+  std::unique_lock<std::mutex> lock(service_acc_bias_mtx_);
+  RCLCPP_INFO(get_logger(), "reset_acc_bias service called");
+  try {
+    if (!vs_) {
+      throw std::runtime_error("sensor handle is null");
+    }
+    // Identity gain, zero bias, then persist to flash so the change survives a power cycle.
+    const vn::math::mat3f gain{1.f, 0.f, 0.f,
+                               0.f, 1.f, 0.f,
+                               0.f, 0.f, 1.f};
+    vs_->writeAccelerationCompensation(gain, {0.f, 0.f, 0.f}, true);
+    vs_->writeSettings(true);
+    resp->success = true;
+    resp->message = "Bias register set to zero. Please reset the device to apply.";
+  } catch (const std::exception & e) {
+    resp->success = false;
+    resp->message = e.what();
+    RCLCPP_ERROR(get_logger(), "reset_acc_bias failed: %s", e.what());
+  }
+}
+
 }  // namespace vectornav
 RCLCPP_COMPONENTS_REGISTER_NODE(vectornav::Vectornav)
