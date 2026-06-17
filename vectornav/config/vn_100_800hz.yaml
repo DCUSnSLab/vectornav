@@ -97,15 +97,16 @@ vectornav:
 
 vn_sensor_msgs:
   ros__parameters:
-    orientation_covariance: [0.01,  0.0,   0.0,
-                            0.0,   0.01,  0.0,
-                            0.0,   0.0,   0.01]
-    angular_velocity_covariance: [0.01,  0.0,   0.0,
-                         0.0,   0.01,  0.0,
-                         0.0,   0.0,   0.01]
-    linear_acceleration_covariance: [0.01,  0.0,   0.0,
-                         0.0,   0.01,  0.0,
-                         0.0,   0.0,   0.01]
+    # static-calibration values copied from vectornav.yaml (user's 8h static cal)
+    orientation_covariance: [7.6e-5, 0.0,    0.0,
+                            0.0,    7.6e-5, 0.0,
+                            0.0,    0.0,    0.01]
+    angular_velocity_covariance: [8.0e-7, 0.0,    0.0,
+                         0.0,    8.0e-7, 0.0,
+                         0.0,    0.0,    8.0e-7]
+    linear_acceleration_covariance: [4.0e-4, 0.0,    0.0,
+                         0.0,    4.0e-4, 0.0,
+                         0.0,    0.0,    4.0e-4]
     magnetic_covariance: [0.01,  0.0,   0.0,
                          0.0,   0.01,  0.0,
                          0.0,   0.0,   0.01]
