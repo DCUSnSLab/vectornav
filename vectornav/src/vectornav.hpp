@@ -25,6 +25,7 @@
 #include <vectornav_msgs/msg/time_group.hpp>
 #include "vectornav_msgs/action/mag_cal.hpp"
 #include <geometry_msgs/msg/twist.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 // VectorNav libvncxx
 #include "vn/compositedata.h"
@@ -45,6 +46,7 @@ namespace vectornav {
     void reconnect_timer();
     bool configure_sensor();
     bool connect(const std::string port, const int baud);
+    bool open_sensor(const std::string & port, const int baud);
     rclcpp::Time getTimeStamp(vn::sensors::CompositeData & data);
     static void ErrorPacketReceivedHandler(
       void * nodeptr, vn::protocol::uart::Packet & errorPacket, size_t packetStartRunningIndex);
@@ -56,11 +58,26 @@ namespace vectornav {
     rclcpp_action::CancelResponse handle_cal_cancel(const std::shared_ptr<MagCalGH> goal_handle);
     void execute_cal(const std::shared_ptr<MagCalGH> goal_handle);
     /**
-    * Callback to take twist message and pass it to VN as velocity aiding 
+    * Callback to take twist message and pass it to VN as velocity aiding
     *
     * \param msg Shared pointer to ROS2 geometry_msgs/Twist message containing velocity information
     */
     void vel_aiding_cb(const geometry_msgs::msg::Twist::SharedPtr msg);
+
+    //
+    // Diagnostic service handlers (operator-triggered).
+    // Ported from RobotnikAutomation/vectornav (commit "feat: add services to reset and tare device (#21)").
+    //
+    void advertise_diagnostic_services();
+    void reset_device(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> resp);
+    void tare_device(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> resp);
+    void reset_acc_bias(
+      const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> resp);
 
     //
     // Parsing functions
@@ -140,6 +157,14 @@ namespace vectornav {
     /// Action servers for calibration
     rclcpp_action::Server<vectornav_msgs::action::MagCal>::SharedPtr server_mag_cal_;
     std::thread action_thread_;
+
+    /// Diagnostic service handles
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_device_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_tare_device_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_acc_bias_;
+    /// The SDK hands a response to whichever command is waiting, so commands from the
+    /// executor and the mag cal thread must not overlap.
+    std::mutex sensor_mtx_;
 
   };
 }
