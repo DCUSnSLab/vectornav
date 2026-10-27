@@ -1,9 +1,8 @@
 # Verification Plan — `feat/diagnostic-services`
 
 This document defines how to verify the branch on a target machine that has
-**ROS 2 Humble** installed and a **physical VectorNav sensor** connected. The
-patches were authored on a Jazzy host without hardware; all runtime
-acceptance criteria below are outstanding until executed there.
+**ROS 2 Humble** installed and a **physical VectorNav sensor** connected.
+Steps already run on hardware are listed under Results.
 
 The branch adds three operator-triggered diagnostic services. Each has its
 own test section with explicit PASS/FAIL criteria. The existing automatic
@@ -121,49 +120,45 @@ on a connected device.
 
 ## Step 5 — `reset_acc_bias` (T3)
 
-Goal: confirm the accelerometer compensation register is cleared and
-persisted, and that a follow-up `reset_device` is required to apply it.
+Goal: confirm the accelerometer compensation register is cleared and saved,
+and that no other register is saved with it.
 
-The handler holds an internal mutex (`service_acc_bias_mtx_`) so concurrent
-calls serialize the flash write.
-
-1. (Optional, for a clear before/after) read the current acceleration with
-   the device level: `ros2 topic echo /vectornav/imu --once`.
-2. Call:
+1. Stop the node. Save a nonzero bias to flash with a serial terminal at the
+   sensor's saved baud rate, for example `$VNWRG,25,1,0,0,0,1,0,0,0,1,0.5,0,0`
+   followed by `$VNWNV`.
+2. Reset the sensor (`$VNRST`) and read the configuration registers (5, 6, 7,
+   25, 32, 75, 76, 77). These are the saved values.
+3. Start the node and call:
 
 ```bash
 ros2 service call /vectornav/reset_acc_bias std_srvs/srv/Trigger {}
 ```
 
 **Expected response:** `success: True`, message
-`Bias register set to zero. Please reset the device to apply.`
+`Acceleration compensation cleared and saved.` Output stops for about 10
+seconds and then resumes at the configured rate.
 
-3. Apply the change:
+4. Stop the node, reset the sensor, and read the same registers again.
 
-```bash
-ros2 service call /vectornav/reset_device std_srvs/srv/Trigger {}
-```
+**PASS:** register 25 reads `1,0,0,0,1,0,0,0,1,0,0,0`, and every other register
+matches step 2.
 
-4. After reconnection, read acceleration again.
+**FAIL:** service returns failure, register 25 still holds the bias, or another
+register (for example the baud rate in register 5) now holds the driver's
+value.
 
-**PASS:** the acceleration vector after the reset cycle reflects the cleared
-bias (typically slightly different from before, by the previous bias value).
+## Step 5b — Calls during magnetic calibration
 
-**FAIL:** service returns failure, or the bias is not actually persisted —
-test by power-cycling the sensor and reading acceleration again; the values
-should match step 4 (after reset), not step 1 (before).
+1. Start a calibration: `ros2 action send_goal /vectornav/mag_cal vectornav_msgs/action/MagCal "{}"`.
+2. While it runs, call `tare_device` repeatedly.
+3. Cancel the goal before it converges.
 
-**Concurrency check (optional):** spam parallel calls in a short window:
+**PASS:** every call returns `success: False` with
+`Sensor busy (magnetic calibration in progress)`, the calibration keeps
+sampling until it is cancelled, and output resumes after the cancel.
 
-```bash
-for i in 1 2 3 4 5; do
-  ros2 service call /vectornav/reset_acc_bias std_srvs/srv/Trigger {} &
-done
-wait
-```
-
-**PASS:** all five complete without hang or SDK error. The mutex serializes
-flash writes.
+**FAIL:** the calibration aborts with `IMU HSI mode did not return to run`, or
+a call times out.
 
 ## Step 6 — Sensor disconnected behavior
 
@@ -228,6 +223,19 @@ Steps 2, 3, 7 with the component loaded into a container. The services
 should appear under the component's namespace and behave identically. This
 exists because the patches were applied through the lifetime hook called
 after `connect()`, which runs in both standalone and composable modes.
+
+## Results
+
+Run on Jazzy with a VN-100T (firmware 3.1.0.0) at 2026-10-27.
+
+| Step | Result |
+| --- | --- |
+| 1 | PASS |
+| 2 | PASS: about 101 Hz on `/vectornav/raw/common`, three services listed |
+| 3 | PASS: output resumes about 6.5 s after the call |
+| 5 | PASS: seeded bias cleared in flash, no other register changed |
+| 5b | PASS in 3 of 3 runs. Before the sensor lock, 4 of 4 runs aborted |
+| 4, 6, 7, 8 | not run |
 
 ## What to report back
 

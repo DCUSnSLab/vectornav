@@ -46,6 +46,7 @@ namespace vectornav {
     void reconnect_timer();
     bool configure_sensor();
     bool connect(const std::string port, const int baud);
+    bool open_sensor(const std::string & port, const int baud);
     rclcpp::Time getTimeStamp(vn::sensors::CompositeData & data);
     static void ErrorPacketReceivedHandler(
       void * nodeptr, vn::protocol::uart::Packet & errorPacket, size_t packetStartRunningIndex);
@@ -161,8 +162,9 @@ namespace vectornav {
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_device_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_tare_device_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset_acc_bias_;
-    /// Serializes acc bias mutation against other device writes.
-    std::mutex service_acc_bias_mtx_;
+    /// The SDK hands a response to whichever command is waiting, so commands from the
+    /// executor and the mag cal thread must not overlap.
+    std::mutex sensor_mtx_;
 
   };
 }

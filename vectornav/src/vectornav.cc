@@ -230,6 +230,10 @@ bool Vectornav::optimize_serial_communication(const std::string & portName)
    */
 void Vectornav::reconnect_timer()
 {
+  std::unique_lock<std::mutex> lock(sensor_mtx_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    return;
+  }
   // Check if the sensor is connected
   if (vs_ && vs_->verifySensorConnectivity()) {
     return;
@@ -253,8 +257,9 @@ rclcpp_action::GoalResponse Vectornav::handle_cal_goal(
 {
   RCLCPP_INFO(get_logger(), "Temporarily stopping sensor streaming for magnetic calibration");
 
-  // check and make sure we are not already doing it
-  if (std::thread::id() == action_thread_.get_id() && vs_->verifySensorConnectivity()) {
+  // execute_cal holds the sensor lock for the whole calibration
+  std::unique_lock<std::mutex> lock(sensor_mtx_, std::try_to_lock);
+  if (lock.owns_lock() && vs_->verifySensorConnectivity()) {
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
   RCLCPP_WARN(get_logger(), "Magnetic calibration already in progress, rejecting request");
@@ -281,6 +286,8 @@ void Vectornav::execute_cal(const std::shared_ptr<MagCalGH> goal_handle)
   // when dealing with GDB on this section of code, beware that
   // breakpoints near the vectornav calls seem to cause odd instability
   // in the device API and may cause calls to return improper values
+
+  std::lock_guard<std::mutex> lock(sensor_mtx_);
 
   // setup a ros rate timer (input is hz)
   rclcpp::Rate loopRate(4.0);
@@ -486,6 +493,11 @@ void Vectornav::execute_cal(const std::shared_ptr<MagCalGH> goal_handle)
    */
 void Vectornav::vel_aiding_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
+  // The sensor still replies, and that reply would reach a command waiting in another thread
+  std::unique_lock<std::mutex> lock(sensor_mtx_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    return;
+  }
   // Take a ROS Twist message, and use it to send a velocity aiding message to the VectorNav
   const auto waitForReply = false;
   const vn::math::vec3f velocity{
@@ -504,6 +516,47 @@ void Vectornav::vel_aiding_cb(const geometry_msgs::msg::Twist::SharedPtr msg)
    * \return     true: OK, false: FAILURE
    */
 bool Vectornav::connect(const std::string port, const int baud)
+{
+  if (!open_sensor(port, baud)) {
+    return false;
+  }
+
+  // Restore Factory Settings for consistency
+  // TODO(Dereck): Move factoryReset to Service Call?
+  // vs_->restoreFactorySettings();
+
+  // Configure the sensor to the requested baudrate
+  if (baud > 0 && baud != vs_->baudrate()) {
+    vs_->changeBaudRate(baud);
+  }
+
+  // Verify connection one more time
+  if (!vs_->verifySensorConnectivity()) {
+    RCLCPP_ERROR(get_logger(), "Unable to connect via %s", port.c_str());
+    return false;
+  }
+
+  // Query the sensor's model number.
+  std::string mn = vs_->readModelNumber();
+  std::string fv = vs_->readFirmwareVersion();
+  uint32_t hv = vs_->readHardwareRevision();
+  uint32_t sn = vs_->readSerialNumber();
+  std::string ut = vs_->readUserTag();
+
+  RCLCPP_INFO(get_logger(), "Connected to %s @ %d baud", port.c_str(), vs_->baudrate());
+  RCLCPP_INFO(get_logger(), "Model: %s", mn.c_str());
+  RCLCPP_INFO(get_logger(), "Firmware Version: %s", fv.c_str());
+  RCLCPP_INFO(get_logger(), "Hardware Version : %d", hv);
+  RCLCPP_INFO(get_logger(), "Serial Number : %d", sn);
+  RCLCPP_INFO(get_logger(), "User Tag : \"%s\"", ut.c_str());
+
+  return configure_sensor();
+}
+
+/**
+   * Opens the port and finds the sensor's baud rate without writing any configuration
+   */
+bool Vectornav::open_sensor(const std::string & port, const int baud)
 {
   // Check if there's an existing instance of the sensor
   // and clean it up if there is so we can start fresh
@@ -550,37 +603,7 @@ bool Vectornav::connect(const std::string port, const int baud)
     RCLCPP_FATAL(get_logger(), "Unable to connect to device %s", port.c_str());
     return false;
   }
-
-  // Restore Factory Settings for consistency
-  // TODO(Dereck): Move factoryReset to Service Call?
-  // vs_->restoreFactorySettings();
-
-  // Configure the sensor to the requested baudrate
-  if (baud > 0 && baud != vs_->baudrate()) {
-    vs_->changeBaudRate(baud);
-  }
-
-  // Verify connection one more time
-  if (!vs_->verifySensorConnectivity()) {
-    RCLCPP_ERROR(get_logger(), "Unable to connect via %s", port.c_str());
-    return false;
-  }
-
-  // Query the sensor's model number.
-  std::string mn = vs_->readModelNumber();
-  std::string fv = vs_->readFirmwareVersion();
-  uint32_t hv = vs_->readHardwareRevision();
-  uint32_t sn = vs_->readSerialNumber();
-  std::string ut = vs_->readUserTag();
-
-  RCLCPP_INFO(get_logger(), "Connected to %s @ %d baud", port.c_str(), vs_->baudrate());
-  RCLCPP_INFO(get_logger(), "Model: %s", mn.c_str());
-  RCLCPP_INFO(get_logger(), "Firmware Version: %s", fv.c_str());
-  RCLCPP_INFO(get_logger(), "Hardware Version : %d", hv);
-  RCLCPP_INFO(get_logger(), "Serial Number : %d", sn);
-  RCLCPP_INFO(get_logger(), "User Tag : \"%s\"", ut.c_str());
-
-  return configure_sensor();
+  return true;
 }
 
 /**
@@ -1474,6 +1497,12 @@ void Vectornav::reset_device(
   std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
 {
   RCLCPP_INFO(get_logger(), "reset_device service called");
+  std::unique_lock<std::mutex> lock(sensor_mtx_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    resp->success = false;
+    resp->message = "Sensor busy (magnetic calibration in progress)";
+    return;
+  }
   try {
     if (!vs_) {
       throw std::runtime_error("sensor handle is null");
@@ -1493,6 +1522,12 @@ void Vectornav::tare_device(
   std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
 {
   RCLCPP_INFO(get_logger(), "tare_device service called");
+  std::unique_lock<std::mutex> lock(sensor_mtx_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    resp->success = false;
+    resp->message = "Sensor busy (magnetic calibration in progress)";
+    return;
+  }
   try {
     if (!vs_) {
       throw std::runtime_error("sensor handle is null");
@@ -1511,20 +1546,35 @@ void Vectornav::reset_acc_bias(
   const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
   std::shared_ptr<std_srvs::srv::Trigger::Response> resp)
 {
-  std::unique_lock<std::mutex> lock(service_acc_bias_mtx_);
   RCLCPP_INFO(get_logger(), "reset_acc_bias service called");
+  std::unique_lock<std::mutex> lock(sensor_mtx_, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    resp->success = false;
+    resp->message = "Sensor busy (magnetic calibration in progress)";
+    return;
+  }
+  const std::string port = get_parameter("port").as_string();
   try {
     if (!vs_) {
       throw std::runtime_error("sensor handle is null");
     }
-    // Identity gain, zero bias, then persist to flash so the change survives a power cycle.
+    // writeSettings stores every register, so reboot first to drop the driver's runtime
+    // configuration and store only this change on top of the saved settings.
+    vs_->reset();
+    vs_->disconnect();
+    if (!open_sensor(port, 0)) {
+      throw std::runtime_error("sensor did not come back after reset");
+    }
     const vn::math::mat3f gain{1.f, 0.f, 0.f,
                                0.f, 1.f, 0.f,
                                0.f, 0.f, 1.f};
     vs_->writeAccelerationCompensation(gain, {0.f, 0.f, 0.f}, true);
     vs_->writeSettings(true);
+    if (!connect(port, get_parameter("baud").as_int())) {
+      throw std::runtime_error("failed to reconfigure sensor");
+    }
     resp->success = true;
-    resp->message = "Bias register set to zero. Please reset the device to apply.";
+    resp->message = "Acceleration compensation cleared and saved.";
   } catch (const std::exception & e) {
     resp->success = false;
     resp->message = e.what();

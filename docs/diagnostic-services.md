@@ -33,15 +33,41 @@ relative to the node, so the default fully qualified names are:
 ### reset_acc_bias
 
 - Type: `std_srvs/srv/Trigger`
-- SDK calls:
+- SDK calls, in order:
+  - `reset()`, then reopen the port at the sensor's saved baud rate
   - `writeAccelerationCompensation(identity_gain, {0,0,0}, true)`
   - `writeSettings(true)` (persists to flash)
+  - `connect()` with the node parameters, which writes the driver configuration again
 - Effect: clears the accelerometer compensation register (identity gain,
-  zero bias) and saves the change. A device reset is required for the new
-  bias to take effect.
-- Success message: `Bias register set to zero. Please reset the device to apply.`
-- Implementation note: the handler holds an internal mutex
-  (`service_acc_bias_mtx_`) so concurrent calls serialize the flash write.
+  zero bias) and saves it to flash. The new compensation applies as soon as
+  it is written; no further reset is needed.
+- Why the reset comes first: `writeSettings` saves every register, not only
+  the one that changed. Without the reset it would also save the driver's
+  runtime configuration (baud rate, binary outputs, ASCII output, sync
+  control), and the sensor would boot with that configuration afterwards.
+- Output stops for about 10 seconds while the sensor reboots and is
+  reconfigured. The executor is blocked for that time.
+- Success message: `Acceleration compensation cleared and saved.`
+
+## Sensor lock
+
+The SDK hands a response to whichever command is waiting for one; it does not
+check which command the response belongs to. Two threads that send commands at
+the same time can therefore receive each other's responses.
+
+The magnetic calibration action runs in its own thread, so the node serializes
+sensor commands with one mutex (`sensor_mtx_`):
+
+| Caller | Behavior |
+| --- | --- |
+| `execute_cal` (mag cal thread) | holds the lock for the whole calibration |
+| `reset_device`, `tare_device`, `reset_acc_bias` | return `success: False`, `Sensor busy (magnetic calibration in progress)` when the lock is held |
+| `reconnect_timer` | skips the tick when the lock is held |
+| `vel_aiding_cb` | drops the sample when the lock is held |
+| `handle_cal_goal` | rejects a second calibration goal when the lock is held |
+
+The executor side never waits for the lock, so a running calibration does not
+block the executor.
 
 ## Example invocations
 
@@ -89,7 +115,7 @@ with `service not available`.
 The design and method names follow
 [RobotnikAutomation/vectornav](https://github.com/RobotnikAutomation/vectornav),
 specifically the change titled `feat: add services to reset and tare device (#21)`.
-The snslab port keeps the same service names and response strings, but adapts
+The snslab port keeps the same service names, but adapts
 to the snslab class layout: the sensor handle is `std::shared_ptr<vn::sensors::VnSensor>`
-(`vs_->...`) and the services are gated behind the `enable_diagnostic_services`
-parameter.
+(`vs_->...`), the services are gated behind the `enable_diagnostic_services`
+parameter, and `reset_acc_bias` reboots the sensor before saving (see above).
